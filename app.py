@@ -11,7 +11,7 @@ import textwrap
 import io 
 from typing import List
 from pathlib import Path
-
+import base64
 
 from google import genai
 from google.cloud import storage
@@ -127,6 +127,30 @@ def get_pdf_bytes_from_gcs(bucket_name: str, blob_name: str) -> bytes | None:
         st.error(f"❌ Error fetching '{blob_name}' from GCS: {e}")
         return None
 
+# ----------------------------------------------------------
+
+def display_pdf_bytes(pdf_bytes: bytes, display_height: int = 700):
+    """
+    Renders PDF bytes directly in Streamlit using a Base64 encoded iframe.
+    This avoids saving the file locally.
+    """
+    try:
+        # Encode the PDF bytes to Base64
+        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+
+        # Create the HTML iframe code
+        pdf_display = f"""
+        <iframe 
+            src="data:application/pdf;base64,{base64_pdf}" 
+            width="100%" 
+            height="{display_height}px" 
+            type="application/pdf"
+        ></iframe>
+        """
+        # Display the iframe in Streamlit
+        st.markdown(pdf_display, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"❌ Could not render PDF for display. Error: {e}")
 # ----------------------------------------------------------
 
 def extract_text_from_url(pdf_url: str) -> str:
@@ -424,6 +448,7 @@ def process_file_from_gcs(file_name: str):
             pdf_bytes = get_pdf_bytes_from_gcs(BUCKET_NAME, file_name)
             
             if pdf_bytes:
+                ss.pdf_bytes = pdf_bytes
                 white_text_results = detect_white_text(pdf_bytes)
                 ss.white_text_results = white_text_results
             else:
@@ -631,7 +656,7 @@ def handle_extraction(resume_text: str, white_text_results: dict):
 
     st.divider()
     st.subheader("💾 Structured Data Summary")
-    st.dataframe(extraction_df, use_container_width=True)
+    st.dataframe(extraction_df, width='stretch')
 
     if st.button("Save Results to BigQuery", key="save_bq_button", type="primary"):
         save_to_bigquery(extraction_df)
@@ -669,10 +694,10 @@ def check_environment_vars():
 
 def main():
     """Main Streamlit app function."""
-    st.set_page_config(page_title="Gemini Resume Parser")
+    # Set page config to wide for a better two-column view
+    st.set_page_config(layout="wide", page_title="Gemini Resume Parser")
 
     st.title("📄 Resume Parser App")
-
     st.write(f"Uses **{MODEL_NAME}** and GCS bucket **{BUCKET_NAME}** (Project: **{PROJECT_ID}**).")
     st.divider()
 
@@ -687,77 +712,98 @@ def main():
         ss.resume_text = None
         ss.lx_result = None
         ss.white_text_results = None
-        ss.selected_gcs_file = None # New state variable for dropdown selection
+        ss.pdf_bytes = None  # Ensure PDF bytes are initialized
+        # Initialize the control variable for the dropdown to the default
+        ss.selected_gcs_file = "Select an existing file..."
 
-    # --- UPLOAD AND SELECTION UI ---
-    st.subheader("🔍 Select a Resume PDF")
-    
-    # 1. Get the list of PDFs from GCS
-    gcs_files = list_gcs_pdfs(BUCKET_NAME)
-    gcs_files_with_default = ["Select an existing file..."] + gcs_files
 
-    # 2. File Uploader (to add a new file)
-    with st.expander("Upload a new file to the bucket", expanded=False):
-        uploaded_file = st.file_uploader("Choose a Resume PDF to upload", type="pdf")
+    # --- DEFINE COLUMNS (e.g., 60% width for controls/results, 40% for PDF) ---
+    col_left, col_right = st.columns([0.6, 0.4])
+
+    # --------------------------------------------------------------------------
+    # LEFT COLUMN: INPUT CONTROLS, EXTRACTION TRIGGER, AND TEXT RESULTS
+    # --------------------------------------------------------------------------
+    with col_left:
         
-        # Check for upload and run handler
-        if uploaded_file:
-            # Check if file has already been processed in the current run (to prevent infinite loops)
-            if ss.uploaded_file_name != uploaded_file.name or ss.selected_gcs_file != uploaded_file.name:
-                handle_file_upload(uploaded_file)
-                # The handle_file_upload already sets ss.selected_gcs_file and st.rerun()
-
-    # 3. Dropdown Selector (for existing files)
-    # Use a key to link the selectbox value to the session state
-    selected_file = st.selectbox(
-        "Or, choose a file from GCS:",
-        options=gcs_files_with_default,
-        index=gcs_files_with_default.index(ss.selected_gcs_file) if ss.selected_gcs_file in gcs_files_with_default else 0,
-        key="selected_gcs_file" # Links the widget value to ss.selected_gcs_file
-    )
-    
-    # Check if a file was selected or if the selection changed
-    if selected_file != "Select an existing file..." and ss.uploaded_file_name != selected_file:
-        # Trigger processing of the selected GCS file
-        process_file_from_gcs(selected_file)
-        # Store the selected name
-        ss.uploaded_file_name = selected_file
-        # Rerun to display the results and make the extraction button visible
-        st.rerun() 
-
-    # --- RESULT DISPLAY ---
-    
-    # Display White Text Findings (New placement from previous version)
-    if ss.white_text_results is not None:
-        white_text_results = ss.white_text_results
+        st.subheader("🔍 Select and Process Resume")
         
-        if white_text_results.get('flagged'):
-            st.divider()
-            st.subheader("🚨 Hidden Text Analysis Result")
-            st.error("🚨 **WHITE TEXT DETECTED (ATS MANIPULATION FLAG)** 🚨")
-            
-            with st.expander(f"Total hidden text segments found: {white_text_results['total_findings']}", expanded=True):
-                for finding in white_text_results['findings']:
-                    st.markdown(f"> **Page {finding['page']}** (BBox: {finding['bbox']})")
-                    st.markdown(f"**REVEALED TEXT**: `{finding['text']}`")
-                    st.markdown("---")
-            
-        elif ss.uploaded_file_name: # Only show success if a file was actually selected/processed
-            st.divider()
-            st.success(f"✅ **Hidden Text Check for {ss.uploaded_file_name}**: No white text detected. Resume seems clean.")
+        # 1. Get the list of PDFs from GCS
+        gcs_files = list_gcs_pdfs(BUCKET_NAME)
+        options_list = ["Select an existing file..."] + gcs_files
 
-    # --- EXTRACTION TRIGGER ---
-    
-    # State-based Logic Execution (Visible after successful file processing)
-    if ss.resume_text:
+        # 2. Dropdown Selector (for existing files)
+        selected_file = st.selectbox(
+            "1. Choose a file from GCS:",
+            options=options_list,
+            # Use key to link to ss.selected_gcs_file (resolves the previous warning)
+            key="selected_gcs_file" 
+        )
+
+        # 3. File Uploader (to add a new file)
+        with st.expander("2. Upload a new file to the bucket", expanded=False):
+            uploaded_file = st.file_uploader("Choose a Resume PDF to upload", type="pdf")
+            
+            # --- UPLOAD/REPROCESS LOGIC ---
+            if uploaded_file:
+                # Use file name check to prevent reprocessing if already handled
+                if ss.uploaded_file_name != uploaded_file.name:
+                    handle_file_upload(uploaded_file)
+            
+        # --- FILE SELECTION CHANGE LOGIC ---
+        # Check if a file was selected/changed AND it's not the default option
+        # AND it's a different file from the one currently being processed
+        if (selected_file != "Select an existing file..." and 
+            ss.uploaded_file_name != selected_file):
+            
+            with st.spinner(f"Processing **{selected_file}** from GCS..."):
+                process_file_from_gcs(selected_file)
+                # Store the selected name
+                ss.uploaded_file_name = selected_file
+                
+            # Rerun to display the results and make the extraction button visible
+            st.rerun() 
+            
         st.divider()
-        st.subheader("⚒️ Extraction")
-        
-        # The extraction is triggered only if there is extracted text
-        if st.button(f"Start LLM Extraction for: {ss.uploaded_file_name}", type="primary", use_container_width=True):
-            # The session state variables are passed to handle_extraction
-            handle_extraction(ss.resume_text, ss.white_text_results)
 
+        # --- EXTRACTION TRIGGER ---
+        if ss.resume_text:
+            st.subheader("⚒️ Extraction")
+            
+            if st.button(f"Start LLM Extraction for: **{ss.uploaded_file_name}**", type="primary", use_container_width=True):
+                # The session state variables are passed to handle_extraction
+                handle_extraction(ss.resume_text, ss.white_text_results)
+
+        # --- HIDDEN TEXT RESULT DISPLAY ---
+        if ss.white_text_results is not None:
+            white_text_results = ss.white_text_results
+            
+            st.divider()
+            
+            if white_text_results.get('flagged'):
+                st.subheader("🚨 Hidden Text Analysis Result")
+                st.error("🚨 **WHITE TEXT DETECTED (ATS MANIPULATION FLAG)** 🚨")
+                
+                with st.expander(f"Total hidden text segments found: {white_text_results['total_findings']}", expanded=True):
+                    for finding in white_text_results['findings']:
+                        st.markdown(f"> **Page {finding['page']}** (BBox: {finding['bbox']})")
+                        st.markdown(f"**REVEALED TEXT**: `{finding['text']}`")
+                        st.markdown("---")
+                
+            elif ss.uploaded_file_name:
+                st.success(f"✅ **Hidden Text Check for {ss.uploaded_file_name}**: No white text detected. Resume seems clean.")
+
+    # --------------------------------------------------------------------------
+    # RIGHT COLUMN: PDF PREVIEW
+    # --------------------------------------------------------------------------
+    with col_right:
+        st.subheader("Resume Preview")
+        
+        if ss.pdf_bytes:
+            # Display the PDF using the function defined in the previous response
+            # Note: We use the full height of the column for better viewing
+            display_pdf_bytes(ss.pdf_bytes, display_height=850) 
+        else:
+            st.info("Select a file from the left column to view the PDF here.")
 
 # ----------------------------------------------------------
 # RUN THE APP
