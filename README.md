@@ -2,10 +2,6 @@
 A Resume Parser built on LangExtract and Streamlit
 
 
-That's a great idea\! A clear setup guide is essential for any GitHub project.
-
-Here is the markdown code for a **Setup and Installation** section of your `README.md`. This guide is structured to be clear, professional, and easy for any developer to follow.
-
 ### ⚙️ Setup and Installation
 
 Follow these steps to get the **Gemini Resume Parser App** running locally on your machine.
@@ -83,6 +79,3 @@ The application will automatically open in your web browser, typically at `http:
 
 -----
 
-This markdown code covers the full process: cloning, environment setup, dependency installation, secure credential configuration, and launching the app.
-
-Would you like to move on to the first section of your app tutorial?
